@@ -11,11 +11,17 @@
 #define graceDistance 12
 #define ledPin 0
 #define openClosePin 16
+#define speakerPin 13
+#define timerSeconds 312500
+#define autoCloseTimeMillis 300000 //Equal to 5 minutes
 
 uint16_t openDistance = 0;
 uint16_t closedDistance = 0;
 String previousState = "CLOSED";
 bool isDisabled = false;
+bool autoCloseEnabled = false;
+volatile unsigned long currentMillis = 0;
+volatile unsigned long previousMillis = 0;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -23,10 +29,15 @@ SoftwareSerial ss(2,14);
 TFMini distanceSensor;
 
 //This is the ISR that's triggered by the timer.
-void inline ledISR(void);
+void ICACHE_RAM_ATTR ledISR();
+
+void ICACHE_RAM_ATTR autoCloseTimer();
 
 //Function that gets the distance reading from the distance sensor.
 uint16_t inline getReading();
+
+void openDoor();
+void closeDoor();
 
 void setup() {
   Serial.begin(115200);
@@ -38,6 +49,7 @@ void setup() {
   pinMode(calibrationButton, INPUT_PULLUP);
   pinMode(ledPin, OUTPUT);
   pinMode(openClosePin, OUTPUT);
+  pinMode(speakerPin, OUTPUT);
   digitalWrite(ledPin, LOW);
   digitalWrite(openClosePin, LOW);
 
@@ -126,109 +138,35 @@ void callback(char* topic, byte* payload, unsigned int length) {
       if (reading >= (float)(closedDistance - graceDistance)) {
         client.publish("GarageState", "CLOSED");
         previousState = "CLOSED";
+
+        if (autoCloseEnabled) {
+          autoCloseEnabled = false;
+          timer1_attachInterrupt(ledISR);
+          timer1_disable();
+          timer1_write(1000000);
+        }
       }
       else if (reading <= (float)(openDistance + graceDistance)) {
         client.publish("GarageState", "OPEN");
         previousState = "OPEN";
+
+        if (!autoCloseEnabled) {
+          autoCloseEnabled = true;
+          timer1_attachInterrupt(autoCloseTimer);
+          timer1_write(timerSeconds);
+          timer1_enable(TIM_DIV256, TIM_EDGE, TIM_LOOP);
+        }
       }
       else {
         client.publish("GarageState", previousState.c_str());
       }
     }
   }
-  else if (dataString == "open") {
-    String clientId = "MainGarageDoor-";
-    clientId += String(random(0xffff), HEX);
-
-    if (client.connect(clientId.c_str())) {
-      /* Get current distance reading
-       * Dividing by 25.4 both averages the 10 readings
-       * and converts the reading to inches simultaneously.
-       */      
-      float reading = (float)(getReading()) / 25.4;
-  
-      if (reading <= (float)(openDistance + graceDistance)) {
-        //Door is already open, so just publish "OPEN"
-        client.publish("GarageState", "OPEN");
-        previousState = "OPEN";
-      }
-      else {
-        /* Door should be closed.
-         * Emulate pressing the button to open door. 
-         */
-        digitalWrite(openClosePin, HIGH);
-        delay(200);
-        digitalWrite(openClosePin, LOW);
-      
-        /* Dividing by 25.4 both averages the 10 readings
-         * and converts the reading to inches simultaneously.
-         */ 
-        float firstReading = (float)(getReading()) / 25.4;
-    
-        delay(2000);
-    
-        /* Dividing by 25.4 both averages the 10 readings
-         * and converts the reading to inches simultaneously.
-         */        
-        float secondReading = (float)(getReading()) / 25.4;
-    
-        if (abs(firstReading - secondReading) <= 1) {
-          /* Emulate pressing button again because the door
-           * probably didn't move. 
-           */
-          digitalWrite(openClosePin, HIGH);
-          delay(200);
-          digitalWrite(openClosePin, LOW);
-        } 
-      } 
-    }
+  else if (dataString == "open") {    
+    openDoor();
   }
   else if (dataString == "close") {
-    String clientId = "MainGarageDoor-";
-    clientId += String(random(0xffff), HEX);
-
-    if (client.connect(clientId.c_str())) {
-      /* Get current distance reading
-       * Dividing by 25.4 both averages the 10 readings
-       * and converts the reading to inches simultaneously.
-       */
-      float reading = (float)(getReading()) / 25.4;
-  
-      if (reading >= (float)(closedDistance - graceDistance)) {
-        //Door is already closed, so just publish "CLOSED"
-        client.publish("GarageState", "CLOSED");
-        previousState = "CLOSED";
-      }
-      else {
-        /* Door should be open
-         * Emulate pressing the button to close door. 
-         */
-        digitalWrite(openClosePin, HIGH);
-        delay(200);
-        digitalWrite(openClosePin, LOW);
-    
-        /* Dividing by 25.4 both averages the 10 readings
-         * and converts the reading to inches simultaneously.
-         */        
-        float firstReading = (float)(getReading()) / 25.4;
-    
-        delay(2000);
-    
-        /* Dividing by 25.4 both averages the 10 readings
-         * and converts the reading to inches simultaneously.
-         */        
-        float secondReading = (float)(getReading()) / 25.4;
-    
-        if (abs(firstReading - secondReading) <= 1) {
-          /* Emulate pressing button again because the door
-           * probably didn't move. 
-           */
-          digitalWrite(openClosePin, HIGH);
-          delay(200);
-          digitalWrite(openClosePin, LOW);
-        }
-      } 
-    }
+    closeDoor();
   }
   else if (dataString == "power") {
     //Toggle reporting state on/off
@@ -357,6 +295,145 @@ uint16_t getReading() {
   return reading;
 }
 
-void inline ledISR(void) {
+void openDoor() {
+  String clientId = "MainGarageDoor-";
+  clientId += String(random(0xffff), HEX);
+
+  if (client.connect(clientId.c_str())) {
+    /* Get current distance reading
+     * Dividing by 25.4 both averages the 10 readings
+     * and converts the reading to inches simultaneously.
+     */      
+    float reading = (float)(getReading()) / 25.4;
+  
+    if (reading <= (float)(openDistance + graceDistance)) {
+      //Door is already open, so just publish "OPEN"
+      client.publish("GarageState", "OPEN");
+      previousState = "OPEN";
+    }
+    else {
+      /* Door should be closed.
+       * Emulate pressing the button to open door. 
+       */
+      digitalWrite(openClosePin, HIGH);
+      delay(200);
+      digitalWrite(openClosePin, LOW);
+      
+      /* Dividing by 25.4 both averages the 10 readings
+       * and converts the reading to inches simultaneously.
+       */ 
+      float firstReading = (float)(getReading()) / 25.4;
+    
+      delay(2000);
+    
+      /* Dividing by 25.4 both averages the 10 readings
+       * and converts the reading to inches simultaneously.
+       */        
+      float secondReading = (float)(getReading()) / 25.4;
+    
+      if (abs(firstReading - secondReading) <= 1) {
+        /* Emulate pressing button again because the door
+         * probably didn't move. 
+         */
+        digitalWrite(openClosePin, HIGH);
+        delay(200);
+        digitalWrite(openClosePin, LOW);
+      } 
+    }
+
+    if (!autoCloseEnabled) {
+      autoCloseEnabled = true;
+      timer1_attachInterrupt(autoCloseTimer);
+      timer1_write(timerSeconds); 
+      currentMillis = millis();
+      previousMillis = currentMillis;
+      timer1_enable(TIM_DIV256, TIM_EDGE, TIM_LOOP);
+    }
+  }
+}
+
+void closeDoor() {
+  autoCloseEnabled = false;
+  timer1_disable();
+  
+  String clientId = "MainGarageDoor-";
+  clientId += String(random(0xffff), HEX);
+
+  if (client.connect(clientId.c_str())) {
+    /* Get current distance reading
+     * Dividing by 25.4 both averages the 10 readings
+     * and converts the reading to inches simultaneously.
+     */
+    float reading = (float)(getReading()) / 25.4;
+  
+    if (reading >= (float)(closedDistance - graceDistance)) {
+      //Door is already closed, so just publish "CLOSED"
+      client.publish("GarageState", "CLOSED");
+      previousState = "CLOSED";
+    }
+    else {
+      /* Door should be open
+       * Emulate pressing the button to close door. 
+       */
+      digitalWrite(openClosePin, HIGH);
+      delay(200);
+      digitalWrite(openClosePin, LOW);
+    
+      /* Dividing by 25.4 both averages the 10 readings
+       * and converts the reading to inches simultaneously.
+       */        
+      float firstReading = (float)(getReading()) / 25.4;
+    
+      delay(2000);
+    
+      /* Dividing by 25.4 both averages the 10 readings
+       * and converts the reading to inches simultaneously.
+       */        
+      float secondReading = (float)(getReading()) / 25.4;
+    
+      if (abs(firstReading - secondReading) <= 1) {
+        /* Emulate pressing button again because the door
+         * probably didn't move. 
+         */
+        digitalWrite(openClosePin, HIGH);
+        delay(200);
+        digitalWrite(openClosePin, LOW);
+      }
+    }
+    
+    currentMillis = 0;
+    previousMillis = 0;
+    timer1_attachInterrupt(ledISR);
+    timer1_write(1000000);
+  }
+}
+
+void ICACHE_RAM_ATTR ledISR() {
+  noInterrupts();
   digitalWrite(ledPin, !digitalRead(ledPin));
+  interrupts();
+}
+
+void ICACHE_RAM_ATTR autoCloseTimer() {
+  noInterrupts();
+  currentMillis = millis();
+  static byte autoCloseMinutes = autoCloseTimeMillis / 60000;
+
+  if (currentMillis - previousMillis >= autoCloseTimeMillis) {
+    //Close door
+    autoCloseMinutes = autoCloseTimeMillis / 60000;
+    closeDoor();
+  }
+  else {
+    byte timeRemainingMinutes = ceil(autoCloseMinutes - ((currentMillis - previousMillis) / 60000));
+    if (autoCloseMinutes != timeRemainingMinutes) {
+      for (int i = autoCloseMinutes - timeRemainingMinutes; i > 0; i--) {
+        tone(speakerPin, 3600);
+        delay(400);
+      }
+      noTone(speakerPin);
+      autoCloseMinutes = timeRemainingMinutes;
+    }
+  }
+  interrupts();
 }
