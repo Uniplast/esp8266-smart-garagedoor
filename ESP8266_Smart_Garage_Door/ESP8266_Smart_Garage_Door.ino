@@ -6,20 +6,24 @@
 
 #define WiFiSSID "**********" //Enter your own WiFi SSID.
 #define WiFiPasswd "********" //Enter password for the SSID above.
-#define mqtt_server "10.0.0.138" //MQTT server IP address.
+#define mqtt_server "10.0.0.138" //MQTT server local IP address.
 #define calibrationButton 4
-#define graceDistance 12
+#define graceDistance 12 //Allowable distance error to avoid incorrect distance reading comparisons.
 #define ledPin 0
 #define openClosePin 16
 #define speakerPin 13
-#define timerSeconds 312500
-#define autoCloseTimeMillis 300000 //Equal to 5 minutes
+#define timerSeconds 312500 //Equal to one second with the timer1 option TIM_DIV256.
+#define autoCloseTimeMillis 300000 //Equal to 5 minutes in milliseconds.
 
 uint16_t openDistance = 0;
 uint16_t closedDistance = 0;
 String previousState = "CLOSED";
 bool isDisabled = false;
 bool autoCloseEnabled = false;
+
+/* These are volatile because they're used and modified by the ISRs.
+ * Also used for auto-close timer.
+ */
 volatile unsigned long currentMillis = 0;
 volatile unsigned long previousMillis = 0;
 
@@ -28,9 +32,8 @@ PubSubClient client(espClient);
 SoftwareSerial ss(2,14);
 TFMini distanceSensor;
 
-//This is the ISR that's triggered by the timer.
+//These are the ISRs that're triggered by the timer.
 void ICACHE_RAM_ATTR ledISR();
-
 void ICACHE_RAM_ATTR autoCloseTimer();
 
 //Function that gets the distance reading from the distance sensor.
@@ -206,7 +209,7 @@ void calibrate() {
   
   while (calibrationMode) {
     /* Wait for user to initially release the calibration button
-     * So we don't get a false first reading 
+     * So we don't get a false first reading.
      */    
     while(digitalRead(calibrationButton) == LOW) {
       /* I made this a PULLUP so the input is not left floating
